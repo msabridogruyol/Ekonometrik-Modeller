@@ -2,11 +2,11 @@
 ═══════════════════════════════════════════════════════════════════
   EKONOMETRİK TEST PAKETİ — ANA MENÜ
   Gereksinimler:
-    C:/Users/sabridogruyol/AppData/Local/Python/pythoncore-3.14-64/python.exe -m pip install pandas
-    C:/Users/sabridogruyol/AppData/Local/Python/pythoncore-3.14-64/python.exe -m pip install statsmodels
-    C:/Users/sabridogruyol/AppData/Local/Python/pythoncore-3.14-64/python.exe -m pip install openpyxl
-    C:/Users/sabridogruyol/AppData/Local/Python/pythoncore-3.14-64/python.exe -m pip install arch
-    C:/Users/sabridogruyol/AppData/Local/Python/pythoncore-3.14-64/python.exe -m pip install scipy
+    pip install pandas
+    pip install statsmodels
+    pip install openpyxl
+    pip install arch
+    pip install scipy
 
   Veri formatı (Excel):
     - 1. sütun : Dönem / Yıl (indeks)
@@ -68,7 +68,7 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────
 # AYARLAR
 # ─────────────────────────────────────────
-FILE_PATH = r"C:\Users\sabridogruyol\OneDrive - Kiğılı Giyim Ticaret A.Ş\Masaüstü\Örnek Veri.xlsx"
+FILE_PATH = r"Veri Dosyası"
 MAX_LAG   = 12
 ALPHA     = 0.05
 
