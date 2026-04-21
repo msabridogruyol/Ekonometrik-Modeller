@@ -1,0 +1,336 @@
+"""
+═══════════════════════════════════════════════════════════════
+  BİRİM KÖK TESTLERİ — İNTERAKTİF MENÜ
+  Gereksinimler:
+    pip install pandas
+    pip install statsmodels
+    pip install openpyxl
+    pip install arch
+═══════════════════════════════════════════════════════════════
+
+  Veri formatı (Excel):
+    - 1. sütun : Dönem / Yıl (indeks)
+    - 2.+ sütun: Test edilecek seriler (başlık adı önemsiz)
+    - Tüm sayısal sütunlar otomatik algılanır
+
+  Test Seçenekleri:
+    1 → ADF    : Augmented Dickey-Fuller
+                 H0: Birim kök var | Gecikme: AIC
+    2 → PP     : Phillips-Perron
+                 H0: Birim kök var | Kernel: Bartlett-Newey-West
+    3 → KPSS   : Kwiatkowski-Phillips-Schmidt-Shin
+                 H0: Seri DURAĞANDIR (ADF'nin tersi!)
+    4 → DF-GLS : Elliott-Rothenberg-Stock
+                 H0: Birim kök var | GLS detrending, küçük örnekte güçlü
+    5 → ZA     : Zivot-Andrews — Yapısal Kırılmalı
+                 H0: Birim kök var | Kırılma tarihi endojen belirlenir
+    0 → Çıkış
+"""
+
+import warnings
+import numpy as np
+import pandas as pd
+from statsmodels.tsa.stattools import adfuller, kpss, zivot_andrews
+
+warnings.filterwarnings("ignore")
+
+# ─────────────────────────────────────────
+# AYARLAR
+# ─────────────────────────────────────────
+FILE_PATH = r"Dosyanın Yolu"
+MAX_LAG   = 12
+ALPHA     = 0.05
+
+# ─────────────────────────────────────────
+# VERİ YÜKLEME
+# ─────────────────────────────────────────
+df_raw = pd.read_excel(FILE_PATH, index_col=0)
+df_raw = df_raw.select_dtypes(include=[np.number])
+VARIABLES = {col: df_raw[col] for col in df_raw.columns}
+
+# ─────────────────────────────────────────
+# TABLO YAZICI
+# ─────────────────────────────────────────
+
+# Sütun genişlikleri
+CW = {
+    "var":   22,
+    "model": 13,
+    "stat":  11,
+    "p":      8,
+    "n":      5,
+    "lag":    5,
+    "c1":     8,
+    "c5":     8,
+    "c10":    9,
+    "karar": 20,
+}
+_TOTAL = sum(CW.values()) + len(CW) - 1
+
+def _line(ch="─"):
+    return ch * _TOTAL
+
+def _header(lag_label="Lag"):
+    return (
+        f"{'Değişken':<{CW['var']}} "
+        f"{'Model':<{CW['model']}} "
+        f"{'İstatistik':>{CW['stat']}} "
+        f"{'p-value':>{CW['p']}} "
+        f"{'n':>{CW['n']}} "
+        f"{lag_label:>{CW['lag']}} "
+        f"{'Krit.1%':>{CW['c1']}} "
+        f"{'Krit.5%':>{CW['c5']}} "
+        f"{'Krit.10%':>{CW['c10']}} "
+        f"{'Karar':<{CW['karar']}}"
+    )
+
+def _row(var, model, stat, p, n, lag, c1, c5, c10, karar_str):
+    lag_s = f"{lag:>{CW['lag']}}" if lag is not None else f"{'—':>{CW['lag']}}"
+    return (
+        f"{str(var):<{CW['var']}} "
+        f"{str(model):<{CW['model']}} "
+        f"{stat:>{CW['stat']}.4f} "
+        f"{p:>{CW['p']}.4f} "
+        f"{n:>{CW['n']}} "
+        f"{lag_s} "
+        f"{c1:>{CW['c1']}.3f} "
+        f"{c5:>{CW['c5']}.3f} "
+        f"{c10:>{CW['c10']}.3f} "
+        f"{karar_str:<{CW['karar']}}"
+    )
+
+def print_table(title, subtitle, rows, note="", lag_label="Lag"):
+    print(f"\n  {title}")
+    print(f"  {subtitle}")
+    print("  " + _line("═"))
+    print("  " + _header(lag_label))
+    print("  " + _line())
+    prev = None
+    for r in rows:
+        if prev is not None and prev != r[0]:
+            print("  " + _line("·"))
+        # İlk satırda değişken adı, sonrakinde boş
+        row_var = r[0] if prev != r[0] else ""
+        print("  " + _row(row_var, *r[1:]))
+        prev = r[0]
+    print("  " + _line("═"))
+    if note:
+        print(f"  Not: {note}\n")
+
+def karar_adf(p):  return "[ + ] Durağan"       if p <= ALPHA else "[ - ] Durağan Değil"
+def karar_kpss(p): return "[ - ] Durağan Değil" if p < ALPHA  else "[ + ] Durağan"
+
+# ─────────────────────────────────────────
+# ENTEGRASYON DERECESİ
+# ─────────────────────────────────────────
+
+def entegrasyon(series, test_fn):
+    for d, s in enumerate([series, series.diff().dropna(), series.diff().diff().dropna()]):
+        try:
+            if test_fn(s) <= ALPHA:
+                return f"I({d})"
+        except Exception:
+            pass
+    return "I(?)"
+
+def print_integration_summary(i_orders):
+    if not i_orders:
+        return
+    w_var = max(len(str(v)) for v, _ in i_orders) + 2
+    total = w_var + 10
+    print(f"\n  {'─' * total}")
+    print(f"  {'ENTEGRASYon DERECESİ ÖZETİ':<{total}}")
+    print(f"  {'ADF · Sabit Model · α = ' + str(ALPHA):<{total}}")
+    print(f"  {'─' * total}")
+    for var, degree in i_orders:
+        print(f"  {str(var):<{w_var}}  {degree}")
+    print(f"  {'─' * total}\n")
+
+# ─────────────────────────────────────────
+# TEST FONKSİYONLARI
+# ─────────────────────────────────────────
+
+def test_adf():
+    rows, i_orders = [], []
+    for var, series in VARIABLES.items():
+        for model, reg in [("Sabit", "c"), ("Sabit+Trend", "ct")]:
+            stat, pval, lag, nobs, crit, _ = adfuller(
+                series.dropna(), maxlag=MAX_LAG, autolag="AIC", regression=reg)
+            rows.append((var, model, stat, pval, nobs, lag,
+                         crit["1%"], crit["5%"], crit["10%"], karar_adf(pval)))
+        i_orders.append((var, entegrasyon(
+            series, lambda s: adfuller(s, autolag="AIC", regression="c")[1])))
+    print_table(
+        "ADF — Augmented Dickey-Fuller",
+        "H0: Birim kök vardır  |  Gecikme seçimi: AIC  |  α = " + str(ALPHA),
+        rows)
+    print_integration_summary(i_orders)
+
+
+def test_pp():
+    try:
+        from arch.unitroot import PhillipsPerron
+    except ImportError:
+        print("\n  [!] PP için: pip install arch\n"); return
+    rows, i_orders = [], []
+    for var, series in VARIABLES.items():
+        for model, trend in [("Sabit", "c"), ("Sabit+Trend", "ct")]:
+            pp = PhillipsPerron(series.dropna(), trend=trend, lags=MAX_LAG)
+            rows.append((var, model, pp.stat, pp.pvalue, pp.nobs, None,
+                         pp.critical_values["1%"], pp.critical_values["5%"],
+                         pp.critical_values["10%"], karar_adf(pp.pvalue)))
+        i_orders.append((var, entegrasyon(
+            series, lambda s: PhillipsPerron(s, trend="c").pvalue)))
+    print_table(
+        "PP — Phillips-Perron",
+        "H0: Birim kök vardır  |  Kernel: Bartlett-Newey-West  |  α = " + str(ALPHA),
+        rows, lag_label="—")
+    print_integration_summary(i_orders)
+
+
+def test_kpss():
+    rows, i_orders = [], []
+    for var, series in VARIABLES.items():
+        for model, reg in [("Sabit", "c"), ("Sabit+Trend", "ct")]:
+            stat, pval, lag, crit = kpss(series.dropna(), regression=reg, nlags="auto")
+            rows.append((var, model, stat, pval, len(series.dropna()), lag,
+                         crit["1%"], crit["5%"], crit["10%"], karar_kpss(pval)))
+        i_orders.append((var, entegrasyon(
+            series, lambda s: 1 - kpss(s, regression="c", nlags="auto")[1])))
+    print_table(
+        "KPSS — Kwiatkowski-Phillips-Schmidt-Shin",
+        "H0: Seri DURAĞANDIR (ADF'nin tersi)  |  α = " + str(ALPHA),
+        rows,
+        note="p < 0.05 → H0 reddedilir → Durağan değil  |  p > 0.05 → Durağan")
+    print_integration_summary(i_orders)
+
+
+def test_dfgls():
+    try:
+        from arch.unitroot import DFGLS
+    except ImportError:
+        print("\n  [!] DF-GLS için: pip install arch\n"); return
+    rows, i_orders = [], []
+    for var, series in VARIABLES.items():
+        for model, trend in [("Sabit", "c"), ("Sabit+Trend", "ct")]:
+            d = DFGLS(series.dropna(), trend=trend, max_lags=MAX_LAG)
+            rows.append((var, model, d.stat, d.pvalue, d.nobs, d.lags,
+                         d.critical_values["1%"], d.critical_values["5%"],
+                         d.critical_values["10%"], karar_adf(d.pvalue)))
+        i_orders.append((var, entegrasyon(
+            series, lambda s: DFGLS(s, trend="c", max_lags=MAX_LAG).pvalue)))
+    print_table(
+        "DF-GLS — Elliott, Rothenberg & Stock (1996)",
+        "H0: Birim kök vardır  |  GLS detrending  |  α = " + str(ALPHA),
+        rows)
+    print_integration_summary(i_orders)
+
+
+def test_za():
+    # ZA için kırılma noktası sütunu lag yerine geçer
+    W_BP = 12
+    _za_total = _TOTAL + W_BP - CW["lag"]
+
+    def za_line(ch="─"):
+        return ch * _za_total
+
+    def za_header():
+        return (
+            f"{'Değişken':<{CW['var']}} "
+            f"{'Model':<{CW['model']}} "
+            f"{'İstatistik':>{CW['stat']}} "
+            f"{'p-value':>{CW['p']}} "
+            f"{'n':>{CW['n']}} "
+            f"{'Kırılma':>{W_BP}} "
+            f"{'Krit.1%':>{CW['c1']}} "
+            f"{'Krit.5%':>{CW['c5']}} "
+            f"{'Krit.10%':>{CW['c10']}} "
+            f"{'Karar':<{CW['karar']}}"
+        )
+
+    def za_row(var, model, stat, p, n, bp, c1, c5, c10, karar_str):
+        stat_s = f"{stat:>{CW['stat']}.4f}" if not np.isnan(stat) else f"{'—':>{CW['stat']}}"
+        p_s    = f"{p:>{CW['p']}.4f}"       if not np.isnan(p)    else f"{'—':>{CW['p']}}"
+        return (
+            f"{str(var):<{CW['var']}} "
+            f"{str(model):<{CW['model']}} "
+            f"{stat_s} {p_s} "
+            f"{n:>{CW['n']}} "
+            f"{str(bp):>{W_BP}} "
+            f"{c1:>{CW['c1']}.3f} "
+            f"{c5:>{CW['c5']}.3f} "
+            f"{c10:>{CW['c10']}.3f} "
+            f"{karar_str:<{CW['karar']}}"
+        )
+
+    print(f"\n  ZA — Zivot-Andrews (1992)")
+    print(f"  H0: Birim kök vardır  |  Kırılma tarihi endojen  |  α = {ALPHA}")
+    print("  " + za_line("═"))
+    print("  " + za_header())
+    print("  " + za_line())
+
+    prev = None
+    for var, series in VARIABLES.items():
+        for model, reg in [("Sabit Kırılma", "c"), ("Trend Kırılma", "t"), ("Her İkisi", "ct")]:
+            try:
+                stat, pval, _, bp, crit = zivot_andrews(
+                    series.dropna(), maxlag=MAX_LAG, regression=reg)
+                try:
+                    bp_label = str(series.dropna().index[bp])[:10]
+                except Exception:
+                    bp_label = str(bp)
+                row_var = var if (prev is None or prev != var) else ""
+                print("  " + za_row(row_var, model, stat, pval,
+                                    len(series.dropna()), bp_label,
+                                    crit["1%"], crit["5%"], crit["10%"],
+                                    karar_adf(pval)))
+            except Exception as e:
+                print(f"  {'':>{CW['var']}} {model:<{CW['model']}}  Hata: {e}")
+            prev = var
+        if list(VARIABLES.keys()).index(var) < len(VARIABLES) - 1:
+            print("  " + za_line("·"))
+
+    print("  " + za_line("═"))
+    print(f"  Not: Kırılma noktası, minimum t-istatistiği veren gözlem olarak seçilir.\n")
+
+
+# ─────────────────────────────────────────
+# MENÜ
+# ─────────────────────────────────────────
+
+MENU = {
+    "1": ("ADF    — Augmented Dickey-Fuller",           test_adf),
+    "2": ("PP     — Phillips-Perron",                   test_pp),
+    "3": ("KPSS   — Kwiatkowski-Phillips-Schmidt-Shin", test_kpss),
+    "4": ("DF-GLS — Elliott-Rothenberg-Stock",          test_dfgls),
+    "5": ("ZA     — Zivot-Andrews (Yapısal Kırılma)",   test_za),
+}
+
+def show_menu():
+    print("\n" + "─" * 55)
+    print("  BİRİM KÖK TESTLERİ")
+    print("─" * 55)
+    for k, (label, _) in MENU.items():
+        print(f"  {k}  →  {label}")
+    print("  0  →  Çıkış")
+    print("─" * 55)
+
+# ─────────────────────────────────────────
+# ANA DÖNGÜ
+# ─────────────────────────────────────────
+
+print(__doc__)
+print(f"  Dosya      : {FILE_PATH}")
+print(f"  Değişkenler: {', '.join(VARIABLES.keys())}  (n={len(next(iter(VARIABLES.values())))})")
+
+while True:
+    show_menu()
+    secim = input("\n  Seçiminiz: ").strip()
+    if secim == "0":
+        print("\n  Çıkılıyor...\n")
+        break
+    elif secim in MENU:
+        _, fn = MENU[secim]
+        fn()
+    else:
+        print("\n  [!] Geçersiz seçim. 0–5 arasında bir değer girin.")
