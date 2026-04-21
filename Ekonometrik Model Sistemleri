@@ -1,0 +1,881 @@
+"""
+═══════════════════════════════════════════════════════════════════
+  EKONOMETRİK TEST PAKETİ — ANA MENÜ
+  Gereksinimler:
+    C:/Users/sabridogruyol/AppData/Local/Python/pythoncore-3.14-64/python.exe -m pip install pandas
+    C:/Users/sabridogruyol/AppData/Local/Python/pythoncore-3.14-64/python.exe -m pip install statsmodels
+    C:/Users/sabridogruyol/AppData/Local/Python/pythoncore-3.14-64/python.exe -m pip install openpyxl
+    C:/Users/sabridogruyol/AppData/Local/Python/pythoncore-3.14-64/python.exe -m pip install arch
+    C:/Users/sabridogruyol/AppData/Local/Python/pythoncore-3.14-64/python.exe -m pip install scipy
+
+  Veri formatı (Excel):
+    - 1. sütun : Dönem / Yıl (indeks)
+    - 2.+ sütun: Test edilecek seriler (başlık adı önemsiz)
+    - Tüm sayısal sütunlar otomatik algılanır
+
+  Kategori 1 — Durağanlık Testleri:
+    1 → ADF    : Augmented Dickey-Fuller
+                 H0: Birim kök var | Gecikme: AIC
+    2 → PP     : Phillips-Perron
+                 H0: Birim kök var | Kernel: Bartlett-Newey-West
+    3 → KPSS   : Kwiatkowski-Phillips-Schmidt-Shin
+                 H0: Seri DURAĞANDIR (ADF'nin tersi!)
+    4 → DF-GLS : Elliott-Rothenberg-Stock
+                 H0: Birim kök var | GLS detrending, küçük örnekte güçlü
+    5 → ZA     : Zivot-Andrews — Yapısal Kırılmalı
+                 H0: Birim kök var | Kırılma tarihi endojen belirlenir
+
+  Kategori 2 — Nedensellik Testleri:
+    1 → Granger         : Standart Granger nedensellik
+                          H0: X, Y'nin Granger nedeni değildir
+    2 → Toda-Yamamoto   : Entegrasyon derecesinden bağımsız Granger
+                          H0: X, Y'nin Granger nedeni değildir
+    3 → Hsiao           : AIC ile optimal gecikme seçimli Granger
+                          H0: X, Y'nin Granger nedeni değildir
+    4 → Engle-Granger   : Koentegrasyon tabanlı nedensellik (ECM)
+                          H0: Uzun dönem nedensellik yoktur
+    5 → Breitung-Candelon: Frekans alanı nedensellik
+                          H0: ω frekansında nedensellik yoktur
+
+  Kategori 3 — Eşbütünleşme Testleri:
+    1 → Engle-Granger   : 2 değişken arası eşbütünleşme
+                          H0: Eşbütünleşme yoktur (artıklar I(1))
+    2 → Johansen        : Çok değişkenli eşbütünleşme
+                          H0: En fazla r adet koentegrasyon vektörü var
+    3 → Phillips-Ouliaris: Artık tabanlı eşbütünleşme testi
+                          H0: Eşbütünleşme yoktur
+    4 → Gregory-Hansen  : Yapısal kırılmalı eşbütünleşme
+                          H0: Kırılmalı eşbütünleşme yoktur
+    5 → ARDL Bounds     : Seviye ilişkisi testi (PSS, 2001)
+                          H0: Seviyede uzun dönem ilişki yoktur
+
+  0 → Çıkış
+"""
+
+import warnings
+import numpy as np
+import pandas as pd
+from itertools import permutations
+from statsmodels.tsa.stattools import adfuller, kpss, zivot_andrews
+from statsmodels.tsa.stattools import grangercausalitytests, coint
+from statsmodels.tsa.vector_ar.var_model import VAR
+from statsmodels.regression.linear_model import OLS
+from statsmodels.tools.tools import add_constant
+from statsmodels.tsa.stattools import coint as phillips_ouliaris
+
+warnings.filterwarnings("ignore")
+
+# ─────────────────────────────────────────
+# AYARLAR
+# ─────────────────────────────────────────
+FILE_PATH = r"C:\Users\sabridogruyol\OneDrive - Kiğılı Giyim Ticaret A.Ş\Masaüstü\Örnek Veri.xlsx"
+MAX_LAG   = 12
+ALPHA     = 0.05
+
+# ─────────────────────────────────────────
+# VERİ YÜKLEME
+# ─────────────────────────────────────────
+df_raw = pd.read_excel(FILE_PATH, index_col=0)
+df_raw = df_raw.select_dtypes(include=[np.number])
+VARIABLES = {col: df_raw[col] for col in df_raw.columns}
+VAR_NAMES = list(VARIABLES.keys())
+VAR_LIST  = [df_raw[c] for c in VAR_NAMES]
+
+# ─────────────────────────────────────────
+# TABLO ALTYAPI
+# ─────────────────────────────────────────
+
+def hline(n, ch="─"): return ch * n
+def sep(n): print("  " + hline(n, "·"))
+def dline(n): print("  " + hline(n, "═"))
+def sline(n): print("  " + hline(n, "─"))
+
+def print_test_header(title, subtitle, note=""):
+    print(f"\n  {title}")
+    print(f"  {subtitle}")
+
+def karar(p, reverse=False):
+    if reverse:
+        return "[ - ] Durağan Değil" if p < ALPHA else "[ + ] Durağan"
+    return "[ + ] Ret" if p <= ALPHA else "[ - ] Red Edilemedi"
+
+# ─────────────────────────────────────────
+# ENTEGRASYON DERECESİ YARDIMCI
+# ─────────────────────────────────────────
+
+def get_integration_order(series):
+    for d, s in enumerate([series, series.diff().dropna(), series.diff().diff().dropna()]):
+        try:
+            _, p, _, _, _, _ = adfuller(s.dropna(), autolag="AIC", regression="c")
+            if p <= ALPHA:
+                return d
+        except Exception:
+            pass
+    return 2
+
+# ═══════════════════════════════════════════════════════
+# KATEGORİ 1: DURAĞANLIK TESTLERİ
+# ═══════════════════════════════════════════════════════
+
+CW = {"var":22,"model":13,"stat":11,"p":8,"n":5,"lag":5,
+      "c1":8,"c5":8,"c10":9,"karar":22}
+_TW = sum(CW.values()) + len(CW) - 1
+
+def _urt_header(lag_label="Lag"):
+    return (f"{'Değişken':<{CW['var']}} {'Model':<{CW['model']}} "
+            f"{'İstatistik':>{CW['stat']}} {'p-value':>{CW['p']}} "
+            f"{'n':>{CW['n']}} {lag_label:>{CW['lag']}} "
+            f"{'Krit.1%':>{CW['c1']}} {'Krit.5%':>{CW['c5']}} "
+            f"{'Krit.10%':>{CW['c10']}} {'Karar':<{CW['karar']}}")
+
+def _urt_row(var, model, stat, p, n, lag, c1, c5, c10, k):
+    lag_s = f"{lag:>{CW['lag']}}" if lag is not None else f"{'—':>{CW['lag']}}"
+    return (f"{str(var):<{CW['var']}} {str(model):<{CW['model']}} "
+            f"{stat:>{CW['stat']}.4f} {p:>{CW['p']}.4f} {n:>{CW['n']}} {lag_s} "
+            f"{c1:>{CW['c1']}.3f} {c5:>{CW['c5']}.3f} {c10:>{CW['c10']}.3f} "
+            f"{k:<{CW['karar']}}")
+
+def print_urt_table(title, subtitle, rows, note="", lag_label="Lag"):
+    print_test_header(title, subtitle)
+    dline(_TW); print("  " + _urt_header(lag_label)); sline(_TW)
+    prev = None
+    for r in rows:
+        if prev is not None and prev != r[0]: sep(_TW)
+        print("  " + _urt_row(r[0] if prev != r[0] else "", *r[1:]))
+        prev = r[0]
+    dline(_TW)
+    if note: print(f"  Not: {note}\n")
+
+def print_integration_summary(i_orders):
+    if not i_orders: return
+    w = max(len(str(v)) for v, _ in i_orders) + 2
+    t = w + 10
+    sline(t)
+    print(f"  {'ENTEGRASYon DERECESİ ÖZETİ':<{t}}")
+    print(f"  {'ADF · Sabit Model · α = ' + str(ALPHA):<{t}}")
+    sline(t)
+    for var, deg in i_orders: print(f"  {str(var):<{w}}  {deg}")
+    sline(t); print()
+
+def karar_adf(p):  return "[ + ] Durağan"       if p <= ALPHA else "[ - ] Durağan Değil"
+def karar_kpss(p): return "[ - ] Durağan Değil" if p < ALPHA  else "[ + ] Durağan"
+
+def entegrasyon(series, fn):
+    for d, s in enumerate([series, series.diff().dropna(), series.diff().diff().dropna()]):
+        try:
+            if fn(s) <= ALPHA: return f"I({d})"
+        except Exception: pass
+    return "I(?)"
+
+def run_adf():
+    rows, io = [], []
+    for var, s in VARIABLES.items():
+        for model, reg in [("Sabit","c"),("Sabit+Trend","ct")]:
+            stat,p,lag,n,crit,_ = adfuller(s.dropna(), maxlag=MAX_LAG, autolag="AIC", regression=reg)
+            rows.append((var,model,stat,p,n,lag,crit["1%"],crit["5%"],crit["10%"],karar_adf(p)))
+        io.append((var, entegrasyon(s, lambda x: adfuller(x,autolag="AIC",regression="c")[1])))
+    print_urt_table("ADF — Augmented Dickey-Fuller",
+                    f"H0: Birim kök vardır  |  Gecikme: AIC  |  α = {ALPHA}", rows)
+    print_integration_summary(io)
+
+def run_pp():
+    try: from arch.unitroot import PhillipsPerron
+    except ImportError: print("\n  [!] pip install arch\n"); return
+    rows, io = [], []
+    for var, s in VARIABLES.items():
+        for model, trend in [("Sabit","c"),("Sabit+Trend","ct")]:
+            pp = PhillipsPerron(s.dropna(), trend=trend, lags=MAX_LAG)
+            rows.append((var,model,pp.stat,pp.pvalue,pp.nobs,None,
+                         pp.critical_values["1%"],pp.critical_values["5%"],
+                         pp.critical_values["10%"],karar_adf(pp.pvalue)))
+        io.append((var, entegrasyon(s, lambda x: PhillipsPerron(x,trend="c").pvalue)))
+    print_urt_table("PP — Phillips-Perron",
+                    f"H0: Birim kök vardır  |  Kernel: Bartlett-Newey-West  |  α = {ALPHA}",
+                    rows, lag_label="—")
+    print_integration_summary(io)
+
+def run_kpss():
+    rows, io = [], []
+    for var, s in VARIABLES.items():
+        for model, reg in [("Sabit","c"),("Sabit+Trend","ct")]:
+            stat,p,lag,crit = kpss(s.dropna(), regression=reg, nlags="auto")
+            rows.append((var,model,stat,p,len(s.dropna()),lag,
+                         crit["1%"],crit["5%"],crit["10%"],karar_kpss(p)))
+        io.append((var, entegrasyon(s, lambda x: 1-kpss(x,regression="c",nlags="auto")[1])))
+    print_urt_table("KPSS — Kwiatkowski-Phillips-Schmidt-Shin",
+                    f"H0: Seri DURAĞANDIR (ADF'nin tersi)  |  α = {ALPHA}", rows,
+                    note="p < 0.05 → H0 reddedilir → Durağan değil  |  p > 0.05 → Durağan")
+    print_integration_summary(io)
+
+def run_dfgls():
+    try: from arch.unitroot import DFGLS
+    except ImportError: print("\n  [!] pip install arch\n"); return
+    rows, io = [], []
+    for var, s in VARIABLES.items():
+        for model, trend in [("Sabit","c"),("Sabit+Trend","ct")]:
+            d = DFGLS(s.dropna(), trend=trend, max_lags=MAX_LAG)
+            rows.append((var,model,d.stat,d.pvalue,d.nobs,d.lags,
+                         d.critical_values["1%"],d.critical_values["5%"],
+                         d.critical_values["10%"],karar_adf(d.pvalue)))
+        io.append((var, entegrasyon(s, lambda x: DFGLS(x,trend="c",max_lags=MAX_LAG).pvalue)))
+    print_urt_table("DF-GLS — Elliott, Rothenberg & Stock (1996)",
+                    f"H0: Birim kök vardır  |  GLS detrending  |  α = {ALPHA}", rows)
+    print_integration_summary(io)
+
+def run_za():
+    W_BP = 12
+    _zt = _TW + W_BP - CW["lag"]
+    def zh():
+        return (f"{'Değişken':<{CW['var']}} {'Model':<{CW['model']}} "
+                f"{'İstatistik':>{CW['stat']}} {'p-value':>{CW['p']}} "
+                f"{'n':>{CW['n']}} {'Kırılma':>{W_BP}} "
+                f"{'Krit.1%':>{CW['c1']}} {'Krit.5%':>{CW['c5']}} "
+                f"{'Krit.10%':>{CW['c10']}} {'Karar':<{CW['karar']}}")
+    print_test_header("ZA — Zivot-Andrews (1992)",
+                      f"H0: Birim kök vardır  |  Kırılma tarihi endojen  |  α = {ALPHA}")
+    dline(_zt); print("  " + zh()); sline(_zt)
+    prev = None
+    for var, s in VARIABLES.items():
+        for model, reg in [("Sabit Kırılma","c"),("Trend Kırılma","t"),("Her İkisi","ct")]:
+            try:
+                stat,p,_,bp,crit = zivot_andrews(s.dropna(), maxlag=MAX_LAG, regression=reg)
+                try: bp_l = str(s.dropna().index[bp])[:10]
+                except: bp_l = str(bp)
+                vn = var if prev != var else ""
+                ss = f"{stat:>{CW['stat']}.4f}"; ps = f"{p:>{CW['p']}.4f}"
+                print(f"  {str(vn):<{CW['var']}} {model:<{CW['model']}} {ss} {ps} "
+                      f"{len(s.dropna()):>{CW['n']}} {bp_l:>{W_BP}} "
+                      f"{crit['1%']:>{CW['c1']}.3f} {crit['5%']:>{CW['c5']}.3f} "
+                      f"{crit['10%']:>{CW['c10']}.3f} {karar_adf(p):<{CW['karar']}}")
+            except Exception as e:
+                print(f"  {var:<{CW['var']}} {model:<{CW['model']}}  Hata: {e}")
+            prev = var
+        if list(VARIABLES.keys()).index(var) < len(VARIABLES)-1: sep(_zt)
+    dline(_zt)
+    print(f"  Not: Kırılma noktası, minimum t-istatistiği veren gözlem olarak seçilir.\n")
+
+# ═══════════════════════════════════════════════════════
+# KATEGORİ 2: NEDENSELLİK TESTLERİ
+# ═══════════════════════════════════════════════════════
+
+CNW = {"pair":30,"lag":5,"f_stat":10,"p":8,"df1":5,"df2":5,"chi2":10,"karar":22}
+_CNW = sum(CNW.values()) + len(CNW) - 1
+
+def _caus_header(stat_label="F-stat", extra_label="df1", extra2_label="df2"):
+    return (f"{'Bağıntı (X → Y)':<{CNW['pair']}} "
+            f"{'Lag':>{CNW['lag']}} "
+            f"{stat_label:>{CNW['f_stat']}} "
+            f"{'p-value':>{CNW['p']}} "
+            f"{extra_label:>{CNW['df1']}} "
+            f"{extra2_label:>{CNW['df2']}} "
+            f"{'Karar':<{CNW['karar']}}")
+
+def _caus_row(pair, lag, stat, p, df1, df2, k):
+    return (f"{str(pair):<{CNW['pair']}} "
+            f"{lag:>{CNW['lag']}} "
+            f"{stat:>{CNW['f_stat']}.4f} "
+            f"{p:>{CNW['p']}.4f} "
+            f"{str(df1):>{CNW['df1']}} "
+            f"{str(df2):>{CNW['df2']}} "
+            f"{k:<{CNW['karar']}}")
+
+def print_caus_table(title, subtitle, rows, stat_label="F-stat",
+                     extra_label="df1", extra2_label="df2", note=""):
+    print_test_header(title, subtitle)
+    dline(_CNW)
+    print("  " + _caus_header(stat_label, extra_label, extra2_label))
+    sline(_CNW)
+    prev = None
+    for r in rows:
+        if prev is not None and prev != r[2]: sep(_CNW)
+        print("  " + _caus_row(*r[:2], *r[3:]))
+        prev = r[2]
+    dline(_CNW)
+    if note: print(f"  Not: {note}\n")
+
+def select_pairs(allow_all=True, johansen=False):
+    """
+    Kullanıcıdan X ve Y seçimi alır.
+    allow_all=True  → 0: tüm çiftler seçeneği gösterilir
+    johansen=True   → birden fazla değişken seçilebilir
+    """
+    print(f"\n  {'─'*40}")
+    print(f"  DEĞİŞKEN SEÇİMİ")
+    print(f"  {'─'*40}")
+    if allow_all:
+        print(f"  0  →  Tüm çiftler (otomatik)")
+    for i, name in enumerate(VAR_NAMES, 1):
+        print(f"  {i}  →  {name}")
+    print(f"  {'─'*40}")
+
+    if johansen:
+        raw = input("  Dahil edilecek değişkenler (örn: 1 2 3): ").strip()
+        if raw == "0" and allow_all:
+            return VAR_NAMES
+        try:
+            idxs = [int(x)-1 for x in raw.split()]
+            selected = [VAR_NAMES[i] for i in idxs if 0 <= i < len(VAR_NAMES)]
+            if len(selected) < 2:
+                print("  [!] En az 2 değişken seçin. Tüm değişkenler kullanılıyor.")
+                return VAR_NAMES
+            return selected
+        except Exception:
+            print("  [!] Geçersiz giriş. Tüm değişkenler kullanılıyor.")
+            return VAR_NAMES
+
+    prompt = "  X (bağımsız) numarası [0=tüm çiftler]: " if allow_all else "  X (bağımsız) numarası: "
+    x_raw = input(prompt).strip()
+
+    if x_raw == "0" and allow_all:
+        return list(permutations(VAR_NAMES, 2))
+
+    try:
+        x_name = VAR_NAMES[int(x_raw) - 1]
+    except (ValueError, IndexError):
+        print("  [!] Geçersiz giriş. Tüm çiftler kullanılıyor.")
+        return list(permutations(VAR_NAMES, 2))
+
+    y_raw = input("  Y (bağımlı)  numarası: ").strip()
+    try:
+        y_name = VAR_NAMES[int(y_raw) - 1]
+    except (ValueError, IndexError):
+        print("  [!] Geçersiz giriş. Tüm çiftler kullanılıyor.")
+        return list(permutations(VAR_NAMES, 2))
+
+    if x_name == y_name:
+        print("  [!] X ve Y aynı olamaz. Tüm çiftler kullanılıyor.")
+        return list(permutations(VAR_NAMES, 2))
+
+    print(f"\n  Seçim: {x_name} → {y_name}\n")
+    return [(x_name, y_name)]
+
+def run_granger():
+    rows = []
+    pairs = select_pairs()
+    for x_name, y_name in pairs:
+        x = VARIABLES[x_name]; y = VARIABLES[y_name]
+        data = pd.concat([y, x], axis=1).dropna()
+        best_lag, best_p, best_f = 1, 1.0, 0.0
+        for lag in range(1, min(MAX_LAG+1, len(data)//4)):
+            try:
+                res = grangercausalitytests(data, maxlag=lag, verbose=False)
+                p = res[lag]["ssr_ftest"][1]
+                f = res[lag]["ssr_ftest"][0]
+                if p < best_p: best_lag, best_p, best_f = lag, p, f
+            except Exception: pass
+        pair_str = f"{x_name} → {y_name}"
+        n = len(data) - best_lag
+        rows.append((pair_str, best_lag, pair_str, best_f, best_p, best_lag, n-best_lag-1,
+                     karar(best_p)))
+    print_caus_table(
+        "Granger Nedensellik Testi",
+        f"H0: X, Y'nin Granger nedeni değildir  |  En düşük p-value'lu lag seçilir  |  α = {ALPHA}",
+        rows, stat_label="F-stat", extra_label="lag", extra2_label="df2",
+        note="Her yön ayrı test edilir. X→Y reddi, Y→X'i garanti etmez.")
+
+def run_toda_yamamoto():
+    rows = []
+    pairs = select_pairs()
+    for x_name, y_name in pairs:
+        x = VARIABLES[x_name]; y = VARIABLES[y_name]
+        d_x = get_integration_order(x)
+        d_y = get_integration_order(y)
+        m = max(d_x, d_y)
+        data = pd.concat([y, x], axis=1).dropna()
+        try:
+            model = VAR(data)
+            lag_res = model.select_order(maxlags=MAX_LAG)
+            p_opt = lag_res.aic if lag_res.aic > 0 else 1
+            p_total = p_opt + m
+            fit = model.fit(p_total)
+            # Wald testi: ilk p_opt gecikmedeki x katsayıları
+            from statsmodels.stats.wald import wald_test
+            n_eq = 2
+            n_coef = fit.params.shape[0]
+            # x katsayı indeksleri (y denkleminde)
+            restr = np.zeros((p_opt, n_coef))
+            for i in range(p_opt):
+                restr[i, 1 + i*n_eq + 1] = 1  # x → y yönü
+            try:
+                wt = fit.wald_test(restr, equation=0)
+                chi2 = float(wt.statistic)
+                wp   = float(wt.pvalue)
+            except Exception:
+                chi2, wp = np.nan, np.nan
+            pair_str = f"{x_name} → {y_name}"
+            rows.append((pair_str, p_opt, pair_str, chi2, wp, p_opt, m,
+                         karar(wp) if not np.isnan(wp) else "—"))
+        except Exception as e:
+            pair_str = f"{x_name} → {y_name}"
+            rows.append((pair_str, 0, pair_str, np.nan, np.nan, 0, m, f"Hata"))
+    print_caus_table(
+        "Toda-Yamamoto Nedensellik Testi",
+        f"H0: X, Y'nin Granger nedeni değildir  |  Entegrasyon derecesinden bağımsız  |  α = {ALPHA}",
+        rows, stat_label="Chi2", extra_label="p_opt", extra2_label="dmax",
+        note="p_opt: optimal gecikme  |  dmax: max entegrasyon derecesi")
+
+def run_hsiao():
+    rows = []
+    pairs = select_pairs()
+    for x_name, y_name in pairs:
+        x = VARIABLES[x_name]; y = VARIABLES[y_name]
+        data = pd.concat([y, x], axis=1).dropna()
+        # Adım 1: Kısıtlı model (sadece y'nin gecikmesi) — AIC ile m seçimi
+        best_m, best_aic_r = 1, np.inf
+        for m in range(1, min(MAX_LAG+1, len(data)//4)):
+            try:
+                res = grangercausalitytests(data, maxlag=m, verbose=False)
+                aic_r = res[m]["params_ftest"][0]  # proxy
+                if aic_r < best_aic_r: best_m, best_aic_r = m, aic_r
+            except Exception: pass
+        # Adım 2: Granger testi optimal gecikme ile
+        try:
+            res = grangercausalitytests(data, maxlag=best_m, verbose=False)
+            f  = res[best_m]["ssr_ftest"][0]
+            p  = res[best_m]["ssr_ftest"][1]
+            df1 = res[best_m]["ssr_ftest"][2]
+            df2 = int(res[best_m]["ssr_ftest"][3])
+        except Exception:
+            f, p, df1, df2 = np.nan, np.nan, 0, 0
+        pair_str = f"{x_name} → {y_name}"
+        rows.append((pair_str, best_m, pair_str, f if not np.isnan(f) else 0,
+                     p if not np.isnan(p) else 1, int(df1), df2,
+                     karar(p) if not np.isnan(p) else "—"))
+    print_caus_table(
+        "Hsiao Nedensellik Testi",
+        f"H0: X, Y'nin Granger nedeni değildir  |  AIC ile optimal gecikme  |  α = {ALPHA}",
+        rows, stat_label="F-stat", extra_label="df1", extra2_label="df2",
+        note="Gecikme AIC minimizasyonu ile ayrı ayrı seçilir (Hsiao 1981)")
+
+def run_ecm_causality():
+    if len(VAR_NAMES) < 2:
+        print("\n  [!] En az 2 değişken gereklidir.\n"); return
+    rows = []
+    pairs = select_pairs()
+    for x_name, y_name in pairs:
+        x = VARIABLES[x_name]; y = VARIABLES[y_name]
+        data = pd.concat([y, x], axis=1).dropna()
+        try:
+            # Koentegrasyon kontrolü (Engle-Granger)
+            _, p_coint, _ = coint(y.dropna(), x.dropna())
+            # ECM artığı
+            reg = OLS(y, add_constant(x)).fit()
+            ecm_resid = reg.resid
+            # Kısa dönem ECM (birinci fark + hata düzeltme terimi)
+            dy = y.diff().dropna()
+            dx = x.diff().dropna()
+            ecm_lag = ecm_resid.shift(1).dropna()
+            idx = dy.index.intersection(dx.index).intersection(ecm_lag.index)
+            endog = dy.loc[idx]
+            exog = pd.concat([dx.loc[idx], ecm_lag.loc[idx]], axis=1)
+            exog = add_constant(exog)
+            ecm_fit = OLS(endog, exog).fit()
+            ecm_t = ecm_fit.tvalues.iloc[-1]
+            ecm_p = ecm_fit.pvalues.iloc[-1]
+            pair_str = f"{x_name} → {y_name}"
+            rows.append((pair_str, 1, pair_str, ecm_t, ecm_p,
+                         round(p_coint, 4), len(idx),
+                         karar(ecm_p)))
+        except Exception as e:
+            pair_str = f"{x_name} → {y_name}"
+            rows.append((pair_str, 0, pair_str, np.nan, np.nan, np.nan, 0, "Hata"))
+    print_caus_table(
+        "Engle-Granger ECM Nedensellik Testi",
+        f"H0: Uzun dönem nedensellik yoktur  |  α = {ALPHA}",
+        rows, stat_label="ECM t-stat", extra_label="p_coint", extra2_label="n",
+        note="p_coint: Engle-Granger koentegrasyon p-value  |  ECM t-stat: hata düzeltme katsayısı")
+
+def run_breitung_candelon():
+    try:
+        from scipy import signal
+    except ImportError:
+        print("\n  [!] pip install scipy\n"); return
+    if len(VAR_NAMES) < 2:
+        print("\n  [!] En az 2 değişken gereklidir.\n"); return
+
+    # Frekans noktaları: 4 temel frekans
+    freqs = [np.pi/6, np.pi/4, np.pi/2, np.pi]
+    freq_labels = ["π/6 (uzun)", "π/4 (orta)", "π/2 (kısa)", "π (çok kısa)"]
+
+    # Tablo başlığı farklı yapıda
+    FW = {"pair":28, "freq":14, "chi2":10, "p":8, "lag":5, "karar":22}
+    _FW = sum(FW.values()) + len(FW) - 1
+
+    print_test_header("Breitung-Candelon Frekans Alanı Nedensellik Testi",
+                      f"H0: ω frekansında X, Y'nin nedeni değildir  |  α = {ALPHA}")
+    dline(_FW)
+    print(f"  {'Bağıntı (X → Y)':<{FW['pair']}} {'Frekans':<{FW['freq']}} "
+          f"{'Chi2':>{FW['chi2']}} {'p-value':>{FW['p']}} {'Lag':>{FW['lag']}} "
+          f"{'Karar':<{FW['karar']}}")
+    sline(_FW)
+
+    pairs = select_pairs()
+    prev = None
+    for x_name, y_name in pairs:
+        x = VARIABLES[x_name]; y = VARIABLES[y_name]
+        data = pd.concat([y, x], axis=1).dropna().values
+        pair_str = f"{x_name} → {y_name}"
+        if prev is not None and prev != pair_str: sep(_FW)
+        # Optimal gecikme
+        try:
+            var_m = VAR(pd.concat([y,x],axis=1).dropna())
+            p_opt = var_m.select_order(maxlags=min(MAX_LAG,8)).aic
+            p_opt = max(1, p_opt)
+        except Exception:
+            p_opt = 2
+        for i, (freq, flabel) in enumerate(zip(freqs, freq_labels)):
+            try:
+                # Breitung-Candelon: cos/sin regresyon kısıt testi
+                T = len(data)
+                y_arr = data[:, 0]; x_arr = data[:, 1]
+                # Birinci fark (I(1) için)
+                dy = np.diff(y_arr); dx = np.diff(x_arr)
+                T2 = len(dy)
+                cos_t = np.cos(freq * np.arange(1, T2+1))
+                sin_t = np.sin(freq * np.arange(1, T2+1))
+                # Regresör matrisi: gecikmeler + cos + sin
+                lags_y = np.column_stack([dy[p_opt-k:T2-k] for k in range(1, p_opt+1)])
+                lags_x = np.column_stack([dx[p_opt-k:T2-k] for k in range(1, p_opt+1)])
+                cos_r = cos_t[p_opt:]
+                sin_r = sin_t[p_opt:]
+                endog = dy[p_opt:]
+                exog_r = add_constant(np.column_stack([lags_y, lags_x]))
+                exog_u = add_constant(np.column_stack([lags_y, lags_x, cos_r, sin_r]))
+                rss_r = OLS(endog, exog_r).fit().ssr
+                rss_u = OLS(endog, exog_u).fit().ssr
+                n_obs = len(endog)
+                chi2 = n_obs * (rss_r - rss_u) / rss_u
+                from scipy.stats import chi2 as chi2_dist
+                p_val = 1 - chi2_dist.cdf(chi2, df=2)
+                vn = pair_str if i == 0 else ""
+                print(f"  {vn:<{FW['pair']}} {flabel:<{FW['freq']}} "
+                      f"{chi2:>{FW['chi2']}.4f} {p_val:>{FW['p']}.4f} "
+                      f"{p_opt:>{FW['lag']}} {karar(p_val):<{FW['karar']}}")
+            except Exception as e:
+                vn = pair_str if i == 0 else ""
+                print(f"  {vn:<{FW['pair']}} {flabel:<{FW['freq']}} {'—':>{FW['chi2']}} "
+                      f"{'—':>{FW['p']}} {p_opt:>{FW['lag']}} Hata: {e}")
+        prev = pair_str
+    dline(_FW)
+    print(f"  Not: π/6≈0.52 uzun dönem | π/4≈0.79 orta | π/2≈1.57 kısa | π≈3.14 çok kısa periyot\n")
+
+# ═══════════════════════════════════════════════════════
+# KATEGORİ 3: EŞBÜTÜNLEŞme TESTLERİ
+# ═══════════════════════════════════════════════════════
+
+EW = {"pair":30,"stat":11,"p":8,"lag":6,"c1":8,"c5":8,"c10":9,"karar":22}
+_EW = sum(EW.values()) + len(EW) - 1
+
+def _ecoint_header():
+    return (f"{'Bağıntı':<{EW['pair']}} {'İstatistik':>{EW['stat']}} "
+            f"{'p-value':>{EW['p']}} {'Lag/r':>{EW['lag']}} "
+            f"{'Krit.1%':>{EW['c1']}} {'Krit.5%':>{EW['c5']}} "
+            f"{'Krit.10%':>{EW['c10']}} {'Karar':<{EW['karar']}}")
+
+def _ecoint_row(pair, stat, p, lag, c1, c5, c10, k):
+    return (f"{str(pair):<{EW['pair']}} {stat:>{EW['stat']}.4f} "
+            f"{p:>{EW['p']}.4f} {str(lag):>{EW['lag']}} "
+            f"{c1:>{EW['c1']}.3f} {c5:>{EW['c5']}.3f} "
+            f"{c10:>{EW['c10']}.3f} {k:<{EW['karar']}}")
+
+def print_ecoint_table(title, subtitle, rows, note=""):
+    print_test_header(title, subtitle)
+    dline(_EW); print("  " + _ecoint_header()); sline(_EW)
+    prev = None
+    for r in rows:
+        if prev is not None and prev != r[0]: sep(_EW)
+        print("  " + _ecoint_row(*r))
+        prev = r[0]
+    dline(_EW)
+    if note: print(f"  Not: {note}\n")
+
+def run_engle_granger_coint():
+    if len(VAR_NAMES) < 2:
+        print("\n  [!] En az 2 değişken gereklidir.\n"); return
+    rows = []
+    pairs = select_pairs()
+    for x_name, y_name in pairs:
+        x = VARIABLES[x_name]; y = VARIABLES[y_name]
+        try:
+            stat, p, crit = coint(y.dropna(), x.dropna())
+            pair_str = f"{y_name} ~ {x_name}"
+            rows.append((pair_str, stat, p, "—",
+                         crit[0], crit[1], crit[2], karar(p)))
+        except Exception as e:
+            rows.append((f"{y_name} ~ {x_name}", np.nan, np.nan, "—",
+                         0, 0, 0, "Hata"))
+    print_ecoint_table(
+        "Engle-Granger Eşbütünleşme Testi",
+        f"H0: Eşbütünleşme yoktur (artıklar I(1))  |  α = {ALPHA}",
+        rows,
+        note="Kritik değerler MacKinnon (2010) tablosundan alınmaktadır.")
+
+def run_johansen():
+    from statsmodels.tsa.vector_ar.vecm import coint_johansen
+    if len(VAR_NAMES) < 2:
+        print("\n  [!] En az 2 değişken gereklidir.\n"); return
+    selected_vars = select_pairs(johansen=True)
+    data = df_raw[selected_vars].dropna()
+    try:
+        res = coint_johansen(data, det_order=0, k_ar_diff=1)
+    except Exception as e:
+        print(f"\n  Hata: {e}\n"); return
+
+    JW = {"r":6, "trace":12, "p_trace":10, "max_eig":12, "p_max":10,
+          "c95_tr":10, "c95_mx":10, "karar":22}
+    _JW = sum(JW.values()) + len(JW) - 1
+
+    print_test_header("Johansen Eşbütünleşme Testi",
+                      f"H0: En fazla r adet koentegrasyon vektörü var  |  det_order=0  |  α = {ALPHA}")
+    dline(_JW)
+    print(f"  {'r (H0)':<{JW['r']}} {'Trace stat':>{JW['trace']}} "
+          f"{'CV Trace 5%':>{JW['p_trace']}} {'Max-Eig stat':>{JW['max_eig']}} "
+          f"{'CV MaxEig 5%':>{JW['p_max']}} {'Trace Karar':<{JW['c95_tr']}} "
+          f"{'MaxEig Karar':<{JW['c95_mx']}} ")
+    sline(_JW)
+
+    n_r = res.lr1.shape[0]
+    for r in range(n_r):
+        trace_stat = res.lr1[r]
+        max_stat   = res.lr2[r]
+        cv_trace   = res.cvt[r, 1]  # 5% kritik değer
+        cv_max     = res.cvm[r, 1]
+        k_tr = "[ + ] Ret" if trace_stat > cv_trace else "[ - ] Red Edilemedi"
+        k_mx = "[ + ] Ret" if max_stat   > cv_max   else "[ - ] Red Edilemedi"
+        print(f"  {r:<{JW['r']}} {trace_stat:>{JW['trace']}.4f} "
+              f"{cv_trace:>{JW['p_trace']}.3f} {max_stat:>{JW['max_eig']}.4f} "
+              f"{cv_max:>{JW['p_max']}.3f} {k_tr:<{JW['c95_tr']}} {k_mx:<{JW['c95_mx']}}")
+    dline(_JW)
+    print(f"  Not: r=0 → koentegrasyon yok | r=1 → 1 koentegrasyon vektörü | vb.\n")
+
+def run_phillips_ouliaris():
+    if len(VAR_NAMES) < 2:
+        print("\n  [!] En az 2 değişken gereklidir.\n"); return
+    rows = []
+    pairs = select_pairs()
+    for x_name, y_name in pairs:
+        x = VARIABLES[x_name]; y = VARIABLES[y_name]
+        try:
+            # statsmodels coint = Phillips-Ouliaris tabanlı
+            stat, p, crit = coint(y.dropna(), x.dropna(), trend="c")
+            pair_str = f"{y_name} ~ {x_name}"
+            rows.append((pair_str, stat, p, "—",
+                         crit[0], crit[1], crit[2], karar(p)))
+        except Exception:
+            rows.append((f"{y_name} ~ {x_name}", np.nan, np.nan, "—", 0, 0, 0, "Hata"))
+    print_ecoint_table(
+        "Phillips-Ouliaris Eşbütünleşme Testi",
+        f"H0: Eşbütünleşme yoktur  |  Artık tabanlı  |  α = {ALPHA}",
+        rows,
+        note="Engle-Granger'dan farkı: artıklarda heteroskedastisiteye karşı dayanıklı.")
+
+def run_gregory_hansen():
+    if len(VAR_NAMES) < 2:
+        print("\n  [!] En az 2 değişken gereklidir.\n"); return
+
+    GW = {"pair":28,"model":16,"stat":11,"bp":12,"c1":8,"c5":8,"c10":8,"karar":22}
+    _GW = sum(GW.values()) + len(GW) - 1
+
+    print_test_header("Gregory-Hansen Eşbütünleşme Testi (1996)",
+                      f"H0: Kırılmalı eşbütünleşme yoktur  |  α = {ALPHA}")
+    dline(_GW)
+    print(f"  {'Bağıntı':<{GW['pair']}} {'Model':<{GW['model']}} "
+          f"{'ADF stat':>{GW['stat']}} {'Kırılma':>{GW['bp']}} "
+          f"{'Krit.1%':>{GW['c1']}} {'Krit.5%':>{GW['c5']}} "
+          f"{'Krit.10%':>{GW['c10']}} {'Karar':<{GW['karar']}}")
+    sline(_GW)
+
+    # GH kritik değerleri (Gregory-Hansen 1996, Tablo 1 - ADF)
+    GH_CRIT = {
+        "C":    {"1%": -5.13, "5%": -4.61, "10%": -4.34},
+        "C/T":  {"1%": -5.45, "5%": -4.99, "10%": -4.72},
+        "C/S":  {"1%": -5.47, "5%": -4.95, "10%": -4.68},
+    }
+
+    pairs = select_pairs()
+    prev = None
+    for x_name, y_name in pairs:
+        x = VARIABLES[x_name]; y = VARIABLES[y_name]
+        pair_str = f"{y_name} ~ {x_name}"
+        if prev is not None and prev != pair_str: sep(_GW)
+        for model_label in ["C", "C/T", "C/S"]:
+            try:
+                y_s = y.dropna(); x_s = x.dropna()
+                idx = y_s.index.intersection(x_s.index)
+                y_s = y_s.loc[idx].values; x_s = x_s.loc[idx].values
+                T = len(y_s)
+                trim = int(0.15 * T)
+                min_stat, min_bp = np.inf, trim
+                for bp in range(trim, T - trim):
+                    du = np.zeros(T); du[bp:] = 1
+                    if model_label == "C":
+                        X = add_constant(np.column_stack([x_s, du]))
+                    elif model_label == "C/T":
+                        t = np.arange(T)
+                        X = add_constant(np.column_stack([x_s, du, t]))
+                    else:  # C/S
+                        X = add_constant(np.column_stack([x_s, du, x_s * du]))
+                    resid = OLS(y_s, X).fit().resid
+                    adf_s = adfuller(resid, maxlag=MAX_LAG, autolag="AIC", regression="nc")[0]
+                    if adf_s < min_stat:
+                        min_stat, min_bp = adf_s, bp
+                crit = GH_CRIT[model_label]
+                k = "[ + ] Ret" if min_stat < crit["5%"] else "[ - ] Red Edilemedi"
+                try: bp_label = str(idx[min_bp])[:10]
+                except: bp_label = str(min_bp)
+                vn = pair_str if model_label == "C" else ""
+                print(f"  {vn:<{GW['pair']}} {model_label:<{GW['model']}} "
+                      f"{min_stat:>{GW['stat']}.4f} {bp_label:>{GW['bp']}} "
+                      f"{crit['1%']:>{GW['c1']}.3f} {crit['5%']:>{GW['c5']}.3f} "
+                      f"{crit['10%']:>{GW['c10']}.3f} {k:<{GW['karar']}}")
+            except Exception as e:
+                vn = pair_str if model_label == "C" else ""
+                print(f"  {vn:<{GW['pair']}} {model_label:<{GW['model']}}  Hata: {e}")
+        prev = pair_str
+    dline(_GW)
+    print(f"  Not: C=sabit kırılma | C/T=trend kırılma | C/S=rejim kayması\n")
+
+def run_ardl_bounds():
+    if len(VAR_NAMES) < 2:
+        print("\n  [!] En az 2 değişken gereklidir.\n"); return
+    pairs = select_pairs()
+
+    # PSS (2001) F-stat kritik değerleri (k=1, sabit+trend için)
+    PSS_CRIT = {
+        "1%":  {"I(0)": 6.84, "I(1)": 7.84},
+        "5%":  {"I(0)": 4.94, "I(1)": 5.73},
+        "10%": {"I(0)": 4.04, "I(1)": 4.78},
+    }
+
+    BW = {"dep":20,"indep":20,"f_stat":10,"p":8,"cv_i0":8,"cv_i1":8,"karar":28}
+    _BW = sum(BW.values()) + len(BW) - 1
+
+    print_test_header("ARDL Bounds Testi — Pesaran, Shin & Smith (2001)",
+                      f"H0: Seviyede uzun dönem ilişki yoktur  |  α = {ALPHA}")
+    dline(_BW)
+    print(f"  {'Bağımlı (Y)':<{BW['dep']}} {'Bağımsız (X)':<{BW['indep']}} "
+          f"{'F-stat':>{BW['f_stat']}} {'p-value':>{BW['p']}} "
+          f"{'CV I(0) 5%':>{BW['cv_i0']}} {'CV I(1) 5%':>{BW['cv_i1']}} "
+          f"{'Karar':<{BW['karar']}}")
+    sline(_BW)
+
+    for x_name, y_name in pairs:
+        x = VARIABLES[x_name]; y = VARIABLES[y_name]
+        try:
+            data = pd.concat([y, x], axis=1).dropna()
+            # ARDL(p,q) modeli: Δy_t = c + Σ φ_i Δy_{t-i} + Σ θ_j Δx_{t-j} + δ1 y_{t-1} + δ2 x_{t-1}
+            dy = data.iloc[:,0].diff().dropna()
+            dx = data.iloc[:,1].diff().dropna()
+            y_lag = data.iloc[:,0].shift(1).dropna()
+            x_lag = data.iloc[:,1].shift(1).dropna()
+            idx = dy.index.intersection(dx.index).intersection(y_lag.index).intersection(x_lag.index)
+            endog = dy.loc[idx]
+            # Optimal gecikme
+            p_opt = min(4, len(idx)//8)
+            cols = [y_lag.loc[idx], x_lag.loc[idx]]
+            for p in range(1, p_opt+1):
+                cols.append(dy.shift(p).loc[idx])
+                cols.append(dx.shift(p).loc[idx])
+            exog = add_constant(pd.concat(cols, axis=1).dropna())
+            endog = endog.loc[exog.index]
+            # Kısıtlı model (y_lag ve x_lag katsayıları = 0)
+            fit_u = OLS(endog, exog).fit()
+            fit_r = OLS(endog, exog.iloc[:, 2:]).fit()
+            # F-stat
+            r_sq = (fit_r.ssr - fit_u.ssr) / 2
+            f_stat = r_sq / (fit_u.ssr / fit_u.df_resid)
+            from scipy.stats import f as f_dist
+            p_val = 1 - f_dist.cdf(f_stat, 2, fit_u.df_resid)
+            cv_i0 = PSS_CRIT["5%"]["I(0)"]
+            cv_i1 = PSS_CRIT["5%"]["I(1)"]
+            if f_stat > cv_i1:
+                k_str = "[ + ] Eşbütünleşme Var"
+            elif f_stat < cv_i0:
+                k_str = "[ - ] Eşbütünleşme Yok"
+            else:
+                k_str = "[ ? ] Sonuçsuz Bölge"
+            print(f"  {y_name:<{BW['dep']}} {x_name:<{BW['indep']}} "
+                  f"{f_stat:>{BW['f_stat']}.4f} {p_val:>{BW['p']}.4f} "
+                  f"{cv_i0:>{BW['cv_i0']}.2f} {cv_i1:>{BW['cv_i1']}.2f} "
+                  f"{k_str:<{BW['karar']}}")
+        except Exception as e:
+            print(f"  {y_name:<{BW['dep']}} {x_name:<{BW['indep']}}  Hata: {e}")
+    dline(_BW)
+    print(f"  Not: F > CV I(1) → eşbütünleşme var | F < CV I(0) → yok | arası → sonuçsuz\n")
+
+# ═══════════════════════════════════════════════════════
+# MENÜ SİSTEMİ
+# ═══════════════════════════════════════════════════════
+
+DURAG_MENU = {
+    "1": ("ADF    — Augmented Dickey-Fuller",           run_adf),
+    "2": ("PP     — Phillips-Perron",                   run_pp),
+    "3": ("KPSS   — Kwiatkowski-Phillips-Schmidt-Shin", run_kpss),
+    "4": ("DF-GLS — Elliott-Rothenberg-Stock",          run_dfgls),
+    "5": ("ZA     — Zivot-Andrews (Yapısal Kırılma)",   run_za),
+}
+
+NEDEN_MENU = {
+    "1": ("Granger          — Standart Granger Nedensellik",     run_granger),
+    "2": ("Toda-Yamamoto    — Entegrasyondan Bağımsız Granger",  run_toda_yamamoto),
+    "3": ("Hsiao            — AIC Optimal Gecikme Granger",      run_hsiao),
+    "4": ("Engle-Granger ECM— Koentegrasyon Tabanlı Nedensellik",run_ecm_causality),
+    "5": ("Breitung-Candelon— Frekans Alanı Nedensellik",        run_breitung_candelon),
+}
+
+COINT_MENU = {
+    "1": ("Engle-Granger   — 2 Değişken Eşbütünleşme",          run_engle_granger_coint),
+    "2": ("Johansen        — Çok Değişkenli Eşbütünleşme",       run_johansen),
+    "3": ("Phillips-Ouliaris— Artık Tabanlı Eşbütünleşme",       run_phillips_ouliaris),
+    "4": ("Gregory-Hansen  — Yapısal Kırılmalı Eşbütünleşme",    run_gregory_hansen),
+    "5": ("ARDL Bounds     — Pesaran-Shin-Smith (2001)",          run_ardl_bounds),
+}
+
+ANA_MENU = {
+    "1": ("Durağanlık Testleri",      DURAG_MENU),
+    "2": ("Nedensellik Testleri",     NEDEN_MENU),
+    "3": ("Eşbütünleşme Testleri",   COINT_MENU),
+}
+
+def show_sub_menu(label, menu):
+    print(f"\n  ── {label} ──")
+    for k, (lbl, _) in menu.items():
+        print(f"  {k}  →  {lbl}")
+    print("  0  →  Geri")
+
+def show_main_menu():
+    print("\n" + "═" * 55)
+    print("  EKONOMETRİK TEST PAKETİ")
+    print("═" * 55)
+    for k, (lbl, _) in ANA_MENU.items():
+        print(f"  {k}  →  {lbl}")
+    print("  0  →  Çıkış")
+    print("─" * 55)
+
+# ─────────────────────────────────────────
+# ANA DÖNGÜ
+# ─────────────────────────────────────────
+
+print(__doc__)
+print(f"  Dosya      : {FILE_PATH}")
+print(f"  Değişkenler: {', '.join(VAR_NAMES)}  (n={len(df_raw)})")
+
+while True:
+    show_main_menu()
+    secim = input("\n  Kategori seçin: ").strip()
+    if secim == "0":
+        print("\n  Çıkılıyor...\n"); break
+    elif secim in ANA_MENU:
+        label, sub_menu = ANA_MENU[secim]
+        while True:
+            show_sub_menu(label, sub_menu)
+            alt = input("\n  Test seçin: ").strip()
+            if alt == "0":
+                break
+            elif alt in sub_menu:
+                _, fn = sub_menu[alt]
+                fn()
+            else:
+                print("\n  [!] Geçersiz seçim.")
+    else:
+        print("\n  [!] Geçersiz seçim. 0–3 arasında bir değer girin.")
