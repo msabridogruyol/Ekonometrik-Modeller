@@ -1,9 +1,0 @@
-streamlit
-pandas
-numpy
-statsmodels
-arch
-scipy
-openpyxl
-xlsxwriter
-plotly
